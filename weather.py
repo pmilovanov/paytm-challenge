@@ -2,19 +2,23 @@ import csv
 import datetime
 import os
 import typing
-from typing import Type
 
 import apache_beam as beam
 import numpy
-import numpy as np
 from apache_beam import PTransform
 from apache_beam.options.pipeline_options import PipelineOptions
-from apache_beam.transforms import window
 from apache_beam.transforms.window import TimestampedValue
 from numpy import mean
 
 OUT_PARSED = "parsed"
 OUT_INVALID = "invalid"
+
+
+# Run like so:
+#
+# > python weather.py --input_weather_dir=data/2019 \
+#                     --input_stationlist=stationlist.csv \
+#                     --input_countrylist=countrylist.csv --outputdir=/tmp/paytm
 
 
 def parse_csv_kv_row(keytype: type, valtype: type, keylen: int = -1, vallen: int = -1):
@@ -43,8 +47,11 @@ def load_dict(filename, parser):
     with open(filename, "r") as f:
         for i, line in enumerate(f.readlines()):
             if i != 0:
-                k, v = parser(line)
-                result[k] = v
+                try:
+                    k, v = parser(line)
+                    result[k] = v
+                except Exception as e:
+                    print("Error while loading %s:%d:  [%s]" % (filename, i, e))
     return result
 
 
@@ -71,6 +78,7 @@ class ParseFn(beam.DoFn):
                 row[8],
                 row[15],
             )
+            stn = int(stn)
             country_code = self.stations.get(stn, "?")
             assert len(frshtt) == 6
             # Missing value later detected simply by checking whether above 999.9
@@ -92,11 +100,6 @@ class ParseFn(beam.DoFn):
             yield beam.pvalue.TaggedOutput(OUT_INVALID, element)
 
 
-class EntryAddTimestampFn(beam.DoFn):
-    def process(self, element: WeatherEntry, *args, **kwargs):
-        yield TimestampedValue(element, int(element.obsdate.timestamp()))
-
-
 class WeatherPipelineOptions(PipelineOptions):
     @classmethod
     def _add_argparse_args(cls, parser):
@@ -108,31 +111,27 @@ class WeatherPipelineOptions(PipelineOptions):
         parser.add_argument("--outputdir", help="Dir to output data")
 
 
-def _printer(label: str):
-    def fn(x):
-        print("%s: %s" % (label, x))
-
-    return fn
-
-
-class Printer(PTransform):
-    def __init__(self, label: str):
-        self.label = label
-
-    def expand(self, input_or_inputs):
-        return input_or_inputs | self.label >> beam.Map(_printer(self.label))
+# Returns length of longest contiguous subsequence of values `val` in sequence `seq`
+def max_consec_sequence_len(seq: typing.Sequence, val):
+    maxlen = 0
+    curlen = 0
+    for el in seq:
+        if el == val:
+            curlen += 1
+        else:
+            maxlen = max(maxlen, curlen)
+            curlen = 0
+    maxlen = max(maxlen, curlen)
+    return maxlen
 
 
 def run():
-
     opts = PipelineOptions()
-
     with beam.Pipeline(options=opts) as p:
 
         opts = opts.view_as(WeatherPipelineOptions)
 
-        countries = load_dict(opts.input_countrylist, parse_csv_kv_row(str, str, 2))
-        stations = load_dict(opts.input_stationlist, parse_csv_kv_row(str, str, 6, 2))
+        stations = load_dict(opts.input_stationlist, parse_csv_kv_row(int, str, 6, 2))
 
         weather_entries, weather_badrows = (
             p
@@ -149,6 +148,12 @@ def run():
             os.path.join(opts.outputdir, "invalid_input_rows")
         )
 
+        def any(seq: typing.Iterable[bool]):
+            result = False
+            for x in seq:
+                result = result or x
+            return result
+
         def process_weather_entries(el):
             key = el[0]
             weather = el[1]
@@ -157,7 +162,7 @@ def run():
                 obsdate=key.obsdate,
                 temp=mean([x.temp for x in weather if x.temp < 9999.9]),
                 windspeed=mean([x.windspeed for x in weather if x.windspeed < 999.9]),
-                tornadoes=not np.all([not x.tornado_or_funnel for x in weather]),
+                tornadoes=any([x.tornado_or_funnel for x in weather]),
             )
 
         weather_by_country_by_day = (
@@ -184,19 +189,47 @@ def run():
         hottest = (
             averages
             | beam.Filter(lambda x: not numpy.isnan(x[1].temp))
-            | beam.combiners.Top.PerKey(1, key=lambda x: x.temp)
+            | "Top hottest" >> beam.combiners.Top.PerKey(1, key=lambda x: x.temp)
             | beam.Map(str)
-            | "Write hottest" >> beam.io.WriteToText(os.path.join(opts.outputdir, "hottest"))
+            | "Write hottest"
+            >> beam.io.WriteToText(os.path.join(opts.outputdir, "hottest"))
         )
 
         second_windiest = (
             averages
             | beam.Filter(lambda x: not numpy.isnan(x[1].windspeed))
-            | beam.combiners.Top.PerKey(2, key=lambda x: x.windspeed)
+            | "Top two windiest"
+            >> beam.combiners.Top.PerKey(2, key=lambda x: x.windspeed)
             | beam.MapTuple(lambda k, v: (k, v[1]))
-            | "Write second windiest" >> beam.io.WriteToText(os.path.join(opts.outputdir, "second_windiest"))
+            | "Write second windiest"
+            >> beam.io.WriteToText(os.path.join(opts.outputdir, "second_windiest"))
         )
 
+        def calc_max_consecutive_tornado_days(el):
+            key, entries = el
+            entries = sorted(entries, key=lambda x: x.obsdate, reverse=True)
+            return (
+                key.year,
+                beam.Row(
+                    country_code=key.country_code,
+                    max_consecutive_tornado_days=max_consec_sequence_len(
+                        [x.tornadoes for x in entries], True
+                    ),
+                ),
+            )
+
+        max_consec_tornado_days = (
+            weather_by_country_by_year
+            | beam.Map(calc_max_consecutive_tornado_days)
+            | "Top consec days tornado"
+            >> beam.combiners.Top.PerKey(
+                1, key=lambda x: x.max_consecutive_tornado_days
+            )
+            | "Write consecutively tornadiest"
+            >> beam.io.WriteToText(
+                os.path.join(opts.outputdir, "consecutively_tornadiest")
+            )
+        )
 
 
 if __name__ == "__main__":
