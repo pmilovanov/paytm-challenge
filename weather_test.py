@@ -12,6 +12,8 @@ def test_parse_csv_kv_row():
     assert parse_csv_kv_row(str, str)("421110,IN") == ("421110", "IN")
     assert parse_csv_kv_row(str, str, 6, 2)("421110,IN") == ("421110", "IN")
     assert parse_csv_kv_row(str, str)("  ,  ") == ("  ", "  ")
+
+    assert parse_csv_kv_row(str, str, 2)("NK,KOREA, NORTH") == ("NK", "KOREA, NORTH")
     with pytest.raises(ValueError):
         assert parse_csv_kv_row(int, str)("  ,  ")
     with pytest.raises(AssertionError):
