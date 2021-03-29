@@ -7,6 +7,7 @@ from typing import Type
 import apache_beam as beam
 from apache_beam import PTransform
 from apache_beam.options.pipeline_options import PipelineOptions
+from apache_beam.transforms import window
 from apache_beam.transforms.window import TimestampedValue
 
 OUT_PARSED = "parsed"
@@ -47,10 +48,7 @@ def parse_weather_entry(line: str):
         assert len(row) == 16
         stn, yearmoda, temp, windspeed, frshtt = row[0], row[2], row[3], row[8], row[15]
         assert len(frshtt) == 6
-        if temp == "9999.9":
-            temp = "-1.0"
-        if windspeed == "999.9":
-            windspeed = "-1.0"
+        # Missing value later detected simply by checking whether above 999.9
         return WeatherEntry(
             int(stn),
             datetime.datetime.strptime(yearmoda, "%Y%m%d"),
@@ -142,18 +140,38 @@ def run():
                 "parsed", "invalid"
             )
         )
-        #timed_weather_entries = weather_entries | "Add timestamp" >> beam.ParDo(EntryAddTimestampFn())
+
+        # windowed_weather_entries = (weather_entries | "Add timestamp" >> beam.ParDo(EntryAddTimestampFn())
+        #                             | beam.WindowInto(window.FixedWindows(24*60*60)))
+
 
         _ = weather_badrows | "Log invalid weather rows" >> beam.io.WriteToText(
             os.path.join(opts.outputdir, "invalid_input_rows")
         )
 
-        weather_by_station = weather_entries | beam.Map(lambda x: (x.stn, x))
+        weather_by_station = windowed_weather_entries | beam.Map(lambda x: (x.stn, x))
+
+
+
+
+
+        def join_to_kv(el):
+            for w in el["weather"]:
+                yield (el["countries"][0], w)
+
+
+
+        def temp_present(el):
+            el.getValue().temp > 0
 
         grouped = ({
             "weather": weather_by_station,
-            "stations": station_entries,
-        }) | "Merge" >> beam.CoGroupByKey() | beam.ParDo(lambda el: )
+            "countries": station_entries,
+        }) | "Merge" >> beam.CoGroupByKey() | beam.Values() | beam.ParDo(join_to_kv)
+
+        with_temp_present = ( grouped | beam.Filter(lambda el: el[1].temp < 9999.9) |
+                              beam.GroupBy(country=lambda x:x[0], obsdate=lambda x:x[1].obsdate) | )
+
 
 
 if __name__ == "__main__":

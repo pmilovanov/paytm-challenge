@@ -47,7 +47,7 @@ def test_parse_weather_entry():
 
     assert parse_weather_entry(
         "958360,99999,20190129,9999.9,60.2,9999.9,9999.9,999.9,999.9,11.1,999.9,93.6*,65.3,0.11G,999.9,010001"
-    ) == WeatherEntry(958360, datetime.datetime(2019, 1, 29, 0, 0), -1.0, -1.0, True)
+    ) == WeatherEntry(958360, datetime.datetime(2019, 1, 29, 0, 0), 9999.9, 999.9, True)
 
 
 # Which country had the hottest average mean temperature over the year?
