@@ -110,40 +110,50 @@ def run():
 
         opts = opts.view_as(WeatherPipelineOptions)
 
-        weather_entries, weather_badrows = (
-            p
-            | "Read weather entries" >> beam.io.ReadFromText(os.path.join(opts.input_weather_dir, "*.csv"))
-            | "Parse weather" >> beam.ParDo(ParseFn(parse_weather_entry)).with_outputs("parsed", "invalid")
-        )
-
-        _ = (
-            weather_badrows
-            | "Log invalid weather rows"
-            >> beam.io.WriteToText(os.path.join(opts.outputdir, "invalid_input_rows"))
-        )
-
         country_entries, country_badrows = (
             p
             | "Read countries" >> beam.io.ReadFromText(opts.input_countrylist)
-            | "Parse countries" >> beam.ParDo(ParseFn(parse_csv_kv_row(str, str, 2))).with_outputs("parsed", "invalid")
+            | "Parse countries"
+            >> beam.ParDo(ParseFn(parse_csv_kv_row(str, str, 2))).with_outputs(
+                "parsed", "invalid"
+            )
         )
         station_entries, station_badrows = (
-                p
-                | "Read stations" >> beam.io.ReadFromText(opts.input_stationlist)
-                | "Parse stations" >> beam.ParDo(ParseFn(parse_csv_kv_row(int, str, 6, 2))).with_outputs("parsed", "invalid")
+            p
+            | "Read stations" >> beam.io.ReadFromText(opts.input_stationlist)
+            | "Parse stations"
+            >> beam.ParDo(ParseFn(parse_csv_kv_row(int, str, 6, 2))).with_outputs(
+                "parsed", "invalid"
+            )
+        )
+        _ = country_badrows | "Log invalid country rows" >> beam.io.WriteToText(
+            os.path.join(opts.outputdir, "invalid_country_rows")
+        )
+        _ = station_badrows | "Log invalid station rows" >> beam.io.WriteToText(
+            os.path.join(opts.outputdir, "invalid_station_rows")
         )
 
-        _ = (
-                country_badrows
-                | "Log invalid country rows"
-                >> beam.io.WriteToText(os.path.join(opts.outputdir, "invalid_country_rows"))
+        weather_entries, weather_badrows = (
+            p
+            | "Read weather entries"
+            >> beam.io.ReadFromText(os.path.join(opts.input_weather_dir, "*.csv"))
+            | "Parse weather"
+            >> beam.ParDo(ParseFn(parse_weather_entry)).with_outputs(
+                "parsed", "invalid"
+            )
         )
-        _ = (
-                station_badrows
-                | "Log invalid station rows"
-                >> beam.io.WriteToText(os.path.join(opts.outputdir, "invalid_station_rows"))
+        #timed_weather_entries = weather_entries | "Add timestamp" >> beam.ParDo(EntryAddTimestampFn())
+
+        _ = weather_badrows | "Log invalid weather rows" >> beam.io.WriteToText(
+            os.path.join(opts.outputdir, "invalid_input_rows")
         )
 
+        weather_by_station = weather_entries | beam.Map(lambda x: (x.stn, x))
+
+        grouped = ({
+            "weather": weather_by_station,
+            "stations": station_entries,
+        }) | "Merge" >> beam.CoGroupByKey() | beam.ParDo(lambda el: )
 
 
 if __name__ == "__main__":
